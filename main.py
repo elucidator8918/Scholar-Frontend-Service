@@ -2,9 +2,18 @@ import csv
 import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright, TimeoutError
 
 app = FastAPI(title="Google Scholar Daily Scraper")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configuration
 CSV_FILE = "scholar_papers.csv"
