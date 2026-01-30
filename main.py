@@ -102,3 +102,10 @@ def download_csv():
         filename=CSV_FILE,
         media_type="text/csv"
     )
+    
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "google-scholar-scraper"
+    }
