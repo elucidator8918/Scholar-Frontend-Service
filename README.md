@@ -1,3 +1,3 @@
-![Cron Job Status](https://api.cron-job.org/jobs/7196221/ade02ae5bf964934/status-1.svg)
+![Cron job status](https://api.cron-job.org/jobs/7196221/8fb1932330b6e175/status-7.svg)
 
 https://scholar-frontend-service.onrender.com/docs
