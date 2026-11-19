@@ -44,8 +44,28 @@ async def scrape_scholar(url: str):
         )
 
         page = await context.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_selector("#gsc_prf_in", timeout=30000)
+        response = await page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
+        
+        print("HTTP Status:", response.status if response else None)
+        print("Final URL:", page.url)
+        print("Page Title:", await page.title())
+        
+        # Save page for inspection
+        await page.screenshot(path="scholar_debug.png", full_page=True)
+        
+        html = await page.content()
+        with open("scholar_debug.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        
+        if await page.locator("#gsc_prf_in").count() == 0:
+            raise Exception(
+                f"Google Scholar did not return the expected profile. "
+                f"URL: {page.url}, Title: {await page.title()}"
+            )
 
         while True:
             try:
