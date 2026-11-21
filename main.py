@@ -1,9 +1,13 @@
 import csv
 import os
+import re
+import asyncio
+from urllib.parse import urlparse, parse_qs
+
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright, TimeoutError
+from scholarly import scholarly
 
 app = FastAPI(title="Google Scholar Daily Scraper")
 
@@ -16,114 +20,140 @@ app.add_middleware(
 )
 
 CSV_FILE = "scholar_papers.csv"
-DEFAULT_URL = "https://scholar.google.com/citations?user=-TXOxzIAAAAJ&hl=en"
 
-# simple job state
+DEFAULT_URL = (
+    "https://scholar.google.com/citations?"
+    "user=-TXOxzIAAAAJ&hl=en"
+)
+
+# Job state
 job_status = {
     "running": False,
     "last_count": 0,
-    "error": None
+    "error": None,
+    "author": None,
+    "total_citations": 0,
+    "h_index": 0,
+    "i10_index": 0,
+    "last_updated": None
 }
 
-async def scrape_scholar(url: str):
-    p = await async_playwright().start()
-    browser = None
-    try:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"]
-        )
 
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+def extract_author_id(url: str) -> str:
+    """Extract Google Scholar author ID from profile URL."""
+
+    parsed = urlparse(url)
+    author_id = parse_qs(parsed.query).get("user", [None])[0]
+
+    if not author_id:
+        # Also allow a raw author ID.
+        if re.fullmatch(r"[-\w]+", url):
+            return url
+
+        raise ValueError("Invalid Google Scholar profile URL or author ID")
+
+    return author_id
+
+
+def scrape_scholar(author_id: str):
+    """
+    Retrieve author profile and publication details using scholarly.
+    """
+
+    author = scholarly.search_author_id(author_id)
+
+    # Fill profile information and publication list.
+    author = scholarly.fill(author)
+
+    author_metrics = {
+        "name": author.get("name", ""),
+        "total_citations": author.get("citedby", 0),
+        "h_index": author.get("hindex", 0),
+        "i10_index": author.get("i10index", 0),
+        "citations_per_year": author.get("cites_per_year", {})
+    }
+
+    papers = []
+
+    for pub in author.get("publications", []):
+
+        bib = pub.get("bib", {})
+
+        title = bib.get("title", "")
+
+        if not title:
+            continue
+
+        citations = pub.get("num_citations", 0) or 0
+
+        # Construct Google Scholar publication URL.
+        pub_id = pub.get("author_pub_id", "")
+
+        link = ""
+
+        if pub_id:
+            link = (
+                "https://scholar.google.com/citations?"
+                f"view_op=view_citation&hl=en&user={author_id}"
+                f"&citation_for_view={pub_id}"
             )
-        )
 
-        page = await context.new_page()
-        response = await page.goto(
-            url,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
-        
-        print("HTTP Status:", response.status if response else None)
-        print("Final URL:", page.url)
-        print("Page Title:", await page.title())
-        
-        # Save page for inspection
-        await page.screenshot(path="scholar_debug.png", full_page=True)
-        
-        html = await page.content()
-        with open("scholar_debug.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        
-        if await page.locator("#gsc_prf_in").count() == 0:
-            raise Exception(
-                f"Google Scholar did not return the expected profile. "
-                f"URL: {page.url}, Title: {await page.title()}"
-            )
+        papers.append({
+            "title": title,
+            "citations": citations,
+            "year": bib.get("pub_year", ""),
+            "link": link
+        })
 
-        while True:
-            try:
-                btn = await page.query_selector("#gsc_bpf_more")
-                if not btn or await btn.get_attribute("disabled"):
-                    break
-                await btn.scroll_into_view_if_needed()
-                await btn.click()
-                await page.wait_for_timeout(1500)
-            except TimeoutError:
-                break
-
-        papers = await page.evaluate("""
-        () => {
-            return Array.from(
-                document.querySelectorAll("#gsc_a_b .gsc_a_tr")
-            ).map(row => {
-                const title = row.querySelector(".gsc_a_t a");
-                const cites = row.querySelector(".gsc_a_c a");
-                const year = row.querySelector(".gsc_a_y span");
-                return {
-                    title: title?.innerText.trim() || "",
-                    link: title ? "https://scholar.google.com" + title.getAttribute("href") : "",
-                    citations: cites ? parseInt(cites.innerText) || 0 : 0,
-                    year: year?.innerText.trim() || ""
-                };
-            });
-        }
-        """)
-
-        return papers
-
-    finally:
-        if browser:
-            await browser.close()
-        await p.stop()
+    return author_metrics, papers
 
 
 async def scrape_and_save(url: str):
     global job_status
+
     job_status["running"] = True
     job_status["error"] = None
 
     try:
-        papers = await scrape_scholar(url)
+        author_id = extract_author_id(url)
 
-        with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
+        # scholarly is synchronous, so run it outside the async event loop.
+        author_metrics, papers = await asyncio.to_thread(
+            scrape_scholar,
+            author_id
+        )
+
+        with open(CSV_FILE, "w", newline="", encoding="utf-8-sig") as f:
+
             writer = csv.DictWriter(
                 f,
-                fieldnames=["title", "citations", "year", "link"]
+                fieldnames=[
+                    "title",
+                    "citations",
+                    "year",
+                    "link"
+                ]
             )
+
             writer.writeheader()
             writer.writerows(papers)
 
-        job_status["last_count"] = len(papers)
+        from datetime import datetime, timezone
+
+        job_status.update({
+            "last_count": len(papers),
+            "author": author_metrics["name"],
+            "total_citations": author_metrics["total_citations"],
+            "h_index": author_metrics["h_index"],
+            "i10_index": author_metrics["i10_index"],
+            "citations_per_year": author_metrics["citations_per_year"],
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "error": None
+        })
 
     except Exception as e:
         job_status["error"] = str(e)
+        print(f"Google Scholar scraping error: {e}")
 
     finally:
         job_status["running"] = False
@@ -132,8 +162,12 @@ async def scrape_and_save(url: str):
 @app.get("/update")
 async def update_csv(
     background_tasks: BackgroundTasks,
-    url: str = Query(DEFAULT_URL, description="Google Scholar profile URL")
+    url: str = Query(
+        DEFAULT_URL,
+        description="Google Scholar profile URL or author ID"
+    )
 ):
+
     if job_status["running"]:
         return {
             "success": False,
@@ -155,8 +189,12 @@ async def status():
 
 @app.get("/download")
 def download_csv():
+
     if not os.path.exists(CSV_FILE):
-        raise HTTPException(status_code=404, detail="CSV file not found")
+        raise HTTPException(
+            status_code=404,
+            detail="CSV file not found"
+        )
 
     return FileResponse(
         path=CSV_FILE,
@@ -167,6 +205,7 @@ def download_csv():
 
 @app.get("/health")
 async def health():
+
     return {
         "status": "ok",
         "service": "google-scholar-scraper"
